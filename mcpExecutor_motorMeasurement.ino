@@ -14,7 +14,7 @@ float SAMPLE_TIME = 0.01;
 float sample;
 const byte pwmPin = 9;
 String valueAsString;
-volatile unsigned int encoderValue = 0;
+int encoderValue = 0;
 int pwmValue = 0;
 
 
@@ -311,8 +311,8 @@ void setup()
 	errorTimerValue = millis();
 
 	// Attach interrupt for encoder
-	attachInterrupt(0, doEncoderA, CHANGE);
-	attachInterrupt(1, doEncoderB, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(encoder0PinA), doEncoderA, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(encoder0PinB), doEncoderB, CHANGE);
 
 	// Give time to set up
 	delay(100);
@@ -323,7 +323,7 @@ void loop()
 	// Generate pwm
 	pwmValue = amplitude*sin(frequency*((sample)) - phase) + bias; // SINUS
 
-																   // Write pwm and direction value to buffer
+	// Write pwm and direction value to buffer
 	if (pwmValue < 0) {
 		ReadBuf[2] = 0;
 		digitalWrite(directionPin, HIGH);
@@ -341,13 +341,16 @@ void loop()
 	analogWrite(pwmPin, pwmValue);
 
 
+	
+
+
 	// Write encoder and direction value to buffer
 	if (encoderValue < 0) {
 		ReadBuf[5] = 0;
 		encoderValue = encoderValue*(-1);
 	}
 	else ReadBuf[5] = 1;
-	encoderValue = encoderValue*(360 / 34608);
+	//encoderValue = (encoderValue *(360 / 34608))*1000;
 	ReadBuf[3] = lowByte(encoderValue);
 	ReadBuf[4] = highByte(encoderValue);
 
@@ -355,7 +358,6 @@ void loop()
 	// Write signal type id to buffer
 	ReadBuf[6] = SINUS_ID;
 
-	Serial.println(encoderValue);
 	//Serial.println(ReadBuf[0]);
 	//Serial.println(ReadBuf[1]);
 	//Serial.println(pwmValue);
