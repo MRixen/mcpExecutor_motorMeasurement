@@ -2,6 +2,8 @@
 #define encoder0PinA 2
 #define encoder0PinB 3
 #define directionPin 4
+#define pinOutRect 6
+#define pinInRect A0
 
 // SINUS
 int frequency = 2;
@@ -10,13 +12,14 @@ int bias = 0;
 int amplitude = 255;
 int startTime;
 int value = 0;
-float SAMPLE_TIME = 0.01;
-float sample;
+float SAMPLE_TIME = 0.5;
+float sample = 0.1;
 const byte pwmPin = 9;
 String valueAsString;
 int encoderValue = 0;
 int pwmValue = 0;
-
+double pwmValueTemp = 0;
+int rectSignalInput = 0;
 
 
 // USER DEFINED
@@ -249,6 +252,13 @@ const int MCP2515 = 2;
 const int NO_DEVICE = 3;
 long errorTimerValue;
 
+enum pulseTypes {
+	sinus,
+	rectangle
+};
+
+pulseTypes pulseType = sinus;
+
 union acc_x
 {
 	short accelerationRawX;
@@ -289,11 +299,13 @@ void setup()
 	pinMode(encoder0PinA, INPUT);
 	pinMode(encoder0PinB, INPUT);
 	pinMode(directionPin, OUTPUT);
+	pinMode(pinOutRect, OUTPUT);
 
 	// Configure I/Os
 	digitalWrite(CS_PIN_ADXL, HIGH);
 	digitalWrite(CS_PIN_MCP2515, HIGH);
 	digitalWrite(10, HIGH);
+	digitalWrite(pinOutRect, LOW);
 
 	// Configure SPI
 	SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
@@ -314,6 +326,8 @@ void setup()
 	attachInterrupt(digitalPinToInterrupt(encoder0PinA), doEncoderA, CHANGE);
 	attachInterrupt(digitalPinToInterrupt(encoder0PinB), doEncoderB, CHANGE);
 
+
+
 	// Give time to set up
 	delay(100);
 }
@@ -321,7 +335,37 @@ void setup()
 void loop()
 {
 	// Generate pwm
-	pwmValue = amplitude*sin(frequency*((sample)) - phase) + bias; // SINUS
+	switch (pulseType)
+	{
+	case sinus:
+		sinusPulser();
+		pulseType = rectangle;
+		break;
+	case rectangle:
+		rectPulser();
+		pulseType = sinus; // TODO: Set to other pulse type, e.g. sawtooth
+	default:
+		break;
+	}
+
+	// Send data to mcp
+	for (size_t i = 0; i < MESSAGE_SIZE_ADXL; i++) mcp2515_load_tx_buffer(ReadBuf[i], i, MESSAGE_SIZE_ADXL);
+
+	// Pause and count
+	delay(10);
+	sample = sample + SAMPLE_TIME;
+}
+void rectPulser() {
+	// Set pin high to get rectangle pulses (0, 5 V)
+	if (digitalRead(pinOutRect) == LOW) digitalWrite(pinOutRect, HIGH);
+
+	// Read analog input for rectangle pulse and convert it to +255 -255
+	analogRead(pinInRect);
+}
+
+void sinusPulser() {
+	// SINUS
+	//pwmValue = amplitude*sin(frequency*((sample)) - phase) + bias; 
 
 	// Write pwm and direction value to buffer
 	if (pwmValue < 0) {
@@ -336,13 +380,8 @@ void loop()
 	ReadBuf[0] = lowByte(pwmValue);
 	ReadBuf[1] = highByte(pwmValue);
 
-
 	// Rotate motor
-	analogWrite(pwmPin, pwmValue);
-
-
-	
-
+	//analogWrite(pwmPin, pwmValue);
 
 	// Write encoder and direction value to buffer
 	if (encoderValue < 0) {
@@ -350,29 +389,12 @@ void loop()
 		encoderValue = encoderValue*(-1);
 	}
 	else ReadBuf[5] = 1;
-	//encoderValue = (encoderValue *(360 / 34608))*1000;
+
 	ReadBuf[3] = lowByte(encoderValue);
 	ReadBuf[4] = highByte(encoderValue);
 
-
 	// Write signal type id to buffer
 	ReadBuf[6] = SINUS_ID;
-
-	//Serial.println(ReadBuf[0]);
-	//Serial.println(ReadBuf[1]);
-	//Serial.println(pwmValue);
-	//Serial.println(ReadBuf[2]);
-	//Serial.println(ReadBuf[3]);
-	//Serial.println(ReadBuf[4]);
-	//Serial.println(ReadBuf[5]);
-	//Serial.println(ReadBuf[6]);
-
-	// Send data to mcp
-	for (size_t i = 0; i < MESSAGE_SIZE_ADXL; i++) mcp2515_load_tx_buffer(ReadBuf[i], i, MESSAGE_SIZE_ADXL);
-
-	// Pause and count
-	delay(10);
-	sample = sample + SAMPLE_TIME;
 }
 
 void mcp2515_init_tx_buffer0(byte identifierLow, byte identifierHigh, byte messageSize) {
@@ -439,6 +461,7 @@ void mcp2515_execute_reset_command() {
 
 	// Read the register value
 	byte actualMode = mcp2515_execute_read_command(REGISTER_CANSTAT, CS_PIN_MCP2515);
+	Serial.print("Try to reset Mcp2515");
 	while (REGISTER_CANSTAT_CONFIGURATION_MODE != (REGISTER_CANSTAT_CONFIGURATION_MODE & actualMode))
 	{
 		actualMode = mcp2515_execute_read_command(REGISTER_CANSTAT, CS_PIN_MCP2515);
