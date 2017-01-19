@@ -1,19 +1,14 @@
 #include <SPI.h>
-#define encoder0PinA 2
-#define encoder0PinB 3
-#define directionPin 4
-#define pinOutRect 6
-#define pinInRect A0
+#define di_encoderPinA 2
+#define di_encoderPinB 3
+#define do_motorDirection 4
+#define ao_pulseRequest A0
+#define ai_pulse A1
 
-// SINUS
-int frequency = 2;
-float phase = 0;
-int bias = 0;
-int amplitude = 255;
+
 int startTime;
 int value = 0;
 float SAMPLE_TIME = 0.5;
-float sample = 0.1;
 const byte pwmPin = 9;
 String valueAsString;
 int encoderValue = 0;
@@ -251,13 +246,19 @@ const int ADXL = 1;
 const int MCP2515 = 2;
 const int NO_DEVICE = 3;
 long errorTimerValue;
+const long MAX_PULSE_DURATION_SINUS = 20000;
+const long MAX_PULSE_DURATION_RECTANGLE = 20000;
+const long MAX_PULSE_DURATION_SAWTOOTH = 1000;
+const long MAX_PULSE_DURATION_TRIANGULAR = 1000;
 
 enum pulseTypes {
-	sinus,
-	rectangle
+	sinus = 1,
+	rectangle = 2,
+	sawtooth = 3,
+	triangular = 4
 };
 
-pulseTypes pulseType = sinus;
+pulseTypes pulseType;
 
 union acc_x
 {
@@ -296,16 +297,17 @@ void setup()
 	pinMode(CS_PIN_ADXL, OUTPUT);
 	pinMode(CS_PIN_MCP2515, OUTPUT); // Set as input to enable pull up resistor. It's neccessary because the ss line is defined at pin 10 + 9
 	pinMode(10, OUTPUT); // Set as input to enable pull up resistor. It's neccessary because the ss line is defined at pin 10 + 9
-	pinMode(encoder0PinA, INPUT);
-	pinMode(encoder0PinB, INPUT);
-	pinMode(directionPin, OUTPUT);
-	pinMode(pinOutRect, OUTPUT);
+	pinMode(di_encoderPinA, INPUT);
+	pinMode(di_encoderPinB, INPUT);
+	pinMode(do_motorDirection, OUTPUT);
+	pinMode(ao_pulseRequest, OUTPUT);
+	pinMode(ai_pulse, INPUT);
 
 	// Configure I/Os
 	digitalWrite(CS_PIN_ADXL, HIGH);
 	digitalWrite(CS_PIN_MCP2515, HIGH);
 	digitalWrite(10, HIGH);
-	digitalWrite(pinOutRect, LOW);
+	digitalWrite(ao_pulseRequest, LOW);
 
 	// Configure SPI
 	SPI.beginTransaction(SPISettings(5000000, MSBFIRST, SPI_MODE3));
@@ -323,59 +325,64 @@ void setup()
 	errorTimerValue = millis();
 
 	// Attach interrupt for encoder
-	attachInterrupt(digitalPinToInterrupt(encoder0PinA), doEncoderA, CHANGE);
-	attachInterrupt(digitalPinToInterrupt(encoder0PinB), doEncoderB, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(di_encoderPinA), doEncoderA, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(di_encoderPinB), doEncoderB, CHANGE);
 
-
+	// Set pulse type to the first pulse
+	pulseType = sinus;
 
 	// Give time to set up
 	delay(100);
+
+	startTime = millis();
 }
 
 void loop()
 {
+	// Set different pulse types after a specific amount of time
+	if (((millis() - startTime) >= MAX_PULSE_DURATION_SINUS) && (pulseType == sinus)) {
+		pulseType = rectangle;
+		startTime = millis();
+	}
+	else if (((millis() - startTime) >= MAX_PULSE_DURATION_RECTANGLE) && (pulseType == rectangle)) {
+		pulseType = sawtooth;
+		startTime = millis();
+	}
+	else if (((millis() - startTime) >= MAX_PULSE_DURATION_SAWTOOTH) && (pulseType == sawtooth)) {
+		pulseType = triangular;
+		startTime = millis();
+	}
+	else if (((millis() - startTime) >= MAX_PULSE_DURATION_TRIANGULAR) && (pulseType == triangular)) {
+		pulseType = sinus;
+		startTime = millis();
+	}
+
 	// Generate pwm
 	switch (pulseType)
 	{
 	case sinus:
-		sinusPulser();
-		pulseType = rectangle;
+		pwmValue = getPulse(pulseType);
 		break;
 	case rectangle:
-		rectPulser();
-		pulseType = sinus; // TODO: Set to other pulse type, e.g. sawtooth
+		pwmValue = getPulse(pulseType);
+		break;
+	case sawtooth:
+		break;
+	case triangular:
+		break;
 	default:
 		break;
 	}
 
-	// Send data to mcp
-	for (size_t i = 0; i < MESSAGE_SIZE_ADXL; i++) mcp2515_load_tx_buffer(ReadBuf[i], i, MESSAGE_SIZE_ADXL);
-
-	// Pause and count
-	delay(10);
-	sample = sample + SAMPLE_TIME;
-}
-void rectPulser() {
-	// Set pin high to get rectangle pulses (0, 5 V)
-	if (digitalRead(pinOutRect) == LOW) digitalWrite(pinOutRect, HIGH);
-
-	// Read analog input for rectangle pulse and convert it to +255 -255
-	analogRead(pinInRect);
-}
-
-void sinusPulser() {
-	// SINUS
-	//pwmValue = amplitude*sin(frequency*((sample)) - phase) + bias; 
-
 	// Write pwm and direction value to buffer
 	if (pwmValue < 0) {
 		ReadBuf[2] = 0;
-		digitalWrite(directionPin, HIGH);
+		digitalWrite(do_motorDirection, HIGH);
 		pwmValue = pwmValue*(-1);
 	}
 	else {
 		ReadBuf[2] = 1;
-		digitalWrite(directionPin, LOW);
+		digitalWrite(do_motorDirection, LOW);
 	}
 	ReadBuf[0] = lowByte(pwmValue);
 	ReadBuf[1] = highByte(pwmValue);
@@ -394,8 +401,24 @@ void sinusPulser() {
 	ReadBuf[4] = highByte(encoderValue);
 
 	// Write signal type id to buffer
-	ReadBuf[6] = SINUS_ID;
+	ReadBuf[6] = pulseType;
+
+	// Send data to mcp
+	for (size_t i = 0; i < MESSAGE_SIZE_ADXL; i++) mcp2515_load_tx_buffer(ReadBuf[i], i, MESSAGE_SIZE_ADXL);
+
+	// Pause
+	delay(10);
 }
+
+int getPulse(int pulseType) {
+
+	// Set pin to 100 to get rectangle pulses (0, 5 V)
+	if (analogRead(ao_pulseRequest) != pulseType) analogWrite(ao_pulseRequest, pulseType);
+
+	// Read analog input for rectangle pulse and convert it to +255 -255
+	return (analogRead(ai_pulse) - 127) * 2;
+}
+
 
 void mcp2515_init_tx_buffer0(byte identifierLow, byte identifierHigh, byte messageSize) {
 
@@ -432,7 +455,6 @@ void mcp2515_init_tx_buffer2(byte identifierLow, byte identifierHigh, byte messa
 	// Set data length and set rtr bit to zero (no remote request)
 	mcp2515_execute_write_command(REGISTER_TXB2DLC, messageSize, CS_PIN_MCP2515);
 }
-
 
 void initAdxl() {
 	writeToSpi(REGISTER_ACCEL_REG_DATA_FORMAT, 0x01, CS_PIN_ADXL);
@@ -758,9 +780,9 @@ void writeSimpleCommandSpi(byte command, int cs_pin)
 void doEncoderA() {
 
 	// look for a low-to-high on channel A
-	if (digitalRead(encoder0PinA) == HIGH) {
+	if (digitalRead(di_encoderPinA) == HIGH) {
 		// check channel B to see which way encoder is turning
-		if (digitalRead(encoder0PinB) == LOW) {
+		if (digitalRead(di_encoderPinB) == LOW) {
 			encoderValue = encoderValue + 1;         // CW
 		}
 		else {
@@ -770,7 +792,7 @@ void doEncoderA() {
 	else   // must be a high-to-low edge on channel A                                       
 	{
 		// check channel B to see which way encoder is turning  
-		if (digitalRead(encoder0PinB) == HIGH) {
+		if (digitalRead(di_encoderPinB) == HIGH) {
 			encoderValue = encoderValue + 1;          // CW
 		}
 		else {
@@ -782,9 +804,9 @@ void doEncoderA() {
 void doEncoderB() {
 
 	// look for a low-to-high on channel B
-	if (digitalRead(encoder0PinB) == HIGH) {
+	if (digitalRead(di_encoderPinB) == HIGH) {
 		// check channel A to see which way encoder is turning
-		if (digitalRead(encoder0PinA) == HIGH) {
+		if (digitalRead(di_encoderPinA) == HIGH) {
 			encoderValue = encoderValue + 1;         // CW
 		}
 		else {
@@ -794,7 +816,7 @@ void doEncoderB() {
 	// Look for a high-to-low on channel B
 	else {
 		// check channel B to see which way encoder is turning  
-		if (digitalRead(encoder0PinA) == LOW) {
+		if (digitalRead(di_encoderPinA) == LOW) {
 			encoderValue = encoderValue + 1;          // CW
 		}
 		else {
